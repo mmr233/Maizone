@@ -120,6 +120,7 @@ def test_image_analyzer_sends_image_data_to_host_vlm() -> None:
     assert result == "一只猫趴在窗边。"
     prompt, options = calls[0]
     assert options["task_name"] == "vlm"
+    assert "max_tokens" not in options
     assert prompt[0]["content"][1]["image_url"]["url"].startswith("data:image/png;base64,")
 
 
@@ -146,6 +147,7 @@ def test_video_analyzer_extracts_evenly_spaced_frames_and_summarizes(monkeypatch
     assert result == "视频中人物先挥手，随后离开画面。"
     prompt, options = calls[0]
     assert options["task_name"] == "vlm"
+    assert "max_tokens" not in options
     assert sum(part.get("type") == "image_url" for part in prompt[0]["content"]) == 2
     assert "0.5 秒" in prompt[0]["content"][1]["text"]
     assert "1.5 秒" in prompt[0]["content"][3]["text"]

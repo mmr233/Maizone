@@ -44,7 +44,7 @@ class QzoneMediaAnalyzer:
                 ],
             }
         ]
-        return await self._generate(prompt, max_tokens=300)
+        return await self._generate(prompt)
 
     async def get_video_description(self, video_path: str, *, frame_count: int = 4) -> str:
         path = Path(video_path)
@@ -103,13 +103,12 @@ class QzoneMediaAnalyzer:
             )
         if not any(part.get("type") == "image_url" for part in parts):
             raise RuntimeError("FFmpeg 没有抽取到可识别画面")
-        return await self._generate([{"role": "user", "content": parts}], max_tokens=500)
+        return await self._generate([{"role": "user", "content": parts}])
 
-    async def _generate(self, prompt: list[dict[str, Any]], *, max_tokens: int) -> str:
+    async def _generate(self, prompt: list[dict[str, Any]]) -> str:
         result = await self.context.llm.generate(
             prompt,
             task_name=self.model_task,
-            max_tokens=max_tokens,
         )
         if not isinstance(result, dict) or result.get("success") is False:
             raise RuntimeError(str((result or {}).get("error") or "多模态模型请求失败"))
