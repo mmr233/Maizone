@@ -9,6 +9,7 @@ class PluginSectionConfig(PluginConfigBase):
     """插件基础配置。"""
 
     __ui_label__ = "基础配置"
+    __ui_i18n__ = {"zh_CN": {"title": "基础配置"}}
     __ui_order__ = 0
 
     enabled: bool = Field(default=True, description="是否启用插件")
@@ -16,6 +17,10 @@ class PluginSectionConfig(PluginConfigBase):
     text_model: str = Field(
         default="replyer",
         description="[默认即可]使用的文本模型在主程序的任务名（'replyer','planner','embedding', 'emoji', 'learner', 'memory', 'utils', 'vlm', 'voice'）"
+    )
+    media_model: str = Field(
+        default="vlm",
+        description="读取空间图片和视频画面时使用的多模态模型任务，通常为 vlm",
     )
     # 获取cookie相关配置
     http_host: str = Field(default="127.0.0.1", description="备用Napcat HTTP服务地址")
@@ -31,6 +36,7 @@ class SendConfig(PluginConfigBase):
     """指令发说说配置"""
 
     __ui_label__ = "发说说"
+    __ui_i18n__ = {"zh_CN": {"title": "发说说"}}
     __ui_order__ = 1
 
     # === 原有配置 ===
@@ -144,6 +150,7 @@ class ReadConfig(PluginConfigBase):
     """指令读说说配置"""
 
     __ui_label__ = "读说说"
+    __ui_i18n__ = {"zh_CN": {"title": "读说说"}}
     __ui_order__ = 2
 
     # 其它配置
@@ -153,6 +160,38 @@ class ReadConfig(PluginConfigBase):
     allow_skip_comment: bool = Field(
         default=True,
         description="读别人空间时是否允许模型选择不评论（输出「不回复」则跳过）",
+    )
+    enable_image_understanding: bool = Field(
+        default=True,
+        description="读取动态时使用多模态模型识别配图",
+    )
+    cache_media_locally: bool = Field(
+        default=False,
+        description="将读取的图片和启用理解的视频下载到插件数据目录，便于理解和排查",
+    )
+    media_cache_ttl_hours: int = Field(
+        default=24,
+        description="本地动态媒体缓存保留小时数，过期文件会在下次读取时清理",
+    )
+    image_max_size_mb: int = Field(
+        default=20,
+        description="允许下载的单张空间图片最大体积（MB）",
+    )
+    enable_video_understanding: bool = Field(
+        default=False,
+        description="下载空间视频并抽帧交给多模态模型理解；需要系统安装 FFmpeg",
+    )
+    video_max_size_mb: int = Field(
+        default=64,
+        description="允许下载并理解的单个空间视频最大体积（MB）",
+    )
+    video_frame_count: int = Field(
+        default=4,
+        description="视频理解时均匀抽取的画面数量（1-8）",
+    )
+    ffmpeg_path: str = Field(
+        default="ffmpeg",
+        description="FFmpeg 可执行文件路径；已加入 PATH 时保持默认值",
     )
     # 提示词相关配置
     prompt: str = Field(default="你是'{bot_personality}'，你正在浏览你好友'{target_name}'的QQ空间，你看到了你的好友'{target_name}'"
@@ -179,6 +218,7 @@ class AutoSendConfig(PluginConfigBase):
     """自动发说说配置"""
 
     __ui_label__ = "自动发说说"
+    __ui_i18n__ = {"zh_CN": {"title": "自动发说说"}}
     __ui_order__ = 3
 
     enable_auto_send: bool = Field(
@@ -211,6 +251,7 @@ class AutoReadConfig(PluginConfigBase):
     """自动读说说配置"""
 
     __ui_label__ = "自动读说说"
+    __ui_i18n__ = {"zh_CN": {"title": "自动读说说"}}
     __ui_order__ = 4
 
     # 自动阅读
@@ -232,6 +273,7 @@ class AutoReplyConfig(PluginConfigBase):
     """自动回复评论配置"""
 
     __ui_label__ = "自动回评论"
+    __ui_i18n__ = {"zh_CN": {"title": "自动回评论"}}
     __ui_order__ = 5
 
     # 自动回复
@@ -265,7 +307,8 @@ class AutoReplyConfig(PluginConfigBase):
 class ImageGenerateConfig(PluginConfigBase):
     """图片生成配置"""
 
-    __ui_label__ = "openai格式图片生成配置"
+    __ui_label__ = "图片生成配置"
+    __ui_i18n__ = {"zh_CN": {"title": "图片生成配置"}}
     __ui_order__ = 6
 
     # AI生图相关配置
@@ -304,6 +347,7 @@ class AuthorityConfig(PluginConfigBase):
     """权限配置。"""
 
     __ui_label__ = "权限配置"
+    __ui_i18n__ = {"zh_CN": {"title": "权限配置"}}
     __ui_order__ = 7
 
     # 发说说指令权限
@@ -393,3 +437,130 @@ class MaizonePluginConfig(PluginConfigBase):
         default_factory=AuthorityConfig,
         description="权限配置"
     )
+
+
+def _apply_zh_cn_field_schema(config_class: type[PluginConfigBase], labels: dict[str, str]) -> None:
+    """为现有配置字段补充 WebUI 简体中文标签与提示。"""
+
+    for field_name, label in labels.items():
+        field_info = config_class.model_fields[field_name]
+        extra = dict(field_info.json_schema_extra or {})
+        hint = str(field_info.description or "").strip()
+        extra.update(
+            label=label,
+            hint=hint,
+            i18n={"zh_CN": {"label": label, "hint": hint}},
+        )
+        field_info.json_schema_extra = extra
+
+
+_apply_zh_cn_field_schema(
+    PluginSectionConfig,
+    {
+        "enabled": "启用插件",
+        "config_version": "配置版本",
+        "text_model": "文本模型任务",
+        "media_model": "多模态理解模型任务",
+        "http_host": "NapCat HTTP 地址",
+        "http_port": "NapCat HTTP 端口",
+        "napcat_token": "NapCat HTTP Token",
+        "cookie_methods": "Cookie 获取方式",
+    },
+)
+_apply_zh_cn_field_schema(
+    SendConfig,
+    {
+        "history_number": "历史说说数量",
+        "enable_image": "发布时附带图片",
+        "image_mode": "图片来源模式",
+        "ai_probability": "AI 配图概率",
+        "image_number": "配图数量",
+        "prompt": "发说说提示词",
+        "enable_chat_memory": "使用今日聊天素材",
+        "filter_mode": "聊天记录过滤模式",
+        "target_chats": "目标会话列表",
+        "time_range": "聊天记录时间范围",
+        "last_hours": "最近小时数",
+        "min_messages": "最少消息数",
+        "max_messages": "最多消息数",
+        "per_message_max_chars": "单条消息最大字符数",
+        "chat_memory_mode": "聊天记录处理模式",
+        "summary_model": "聊天摘要模型任务",
+        "summary_prompt": "聊天摘要提示词",
+        "hybrid_recent_count": "混合模式保留消息数",
+        "fallback_prompt": "聊天素材不足时的提示词",
+    },
+)
+_apply_zh_cn_field_schema(
+    ReadConfig,
+    {
+        "read_number": "读取说说数量",
+        "like_probability": "点赞概率",
+        "comment_probability": "评论概率",
+        "allow_skip_comment": "允许跳过评论",
+        "enable_image_understanding": "识别动态图片",
+        "cache_media_locally": "缓存动态媒体到本地",
+        "media_cache_ttl_hours": "媒体缓存保留小时数",
+        "image_max_size_mb": "图片最大体积（MB）",
+        "enable_video_understanding": "理解动态视频",
+        "video_max_size_mb": "视频最大体积（MB）",
+        "video_frame_count": "视频抽帧数量",
+        "ffmpeg_path": "FFmpeg 路径",
+        "prompt": "普通说说评论提示词",
+        "rt_prompt": "转发说说评论提示词",
+    },
+)
+_apply_zh_cn_field_schema(
+    AutoSendConfig,
+    {
+        "enable_auto_send": "启用定时发说说",
+        "daily_probability": "每日发送概率",
+        "schedule": "每日发送时间",
+        "fluctuation": "发送时间浮动分钟数",
+        "random_topic": "随机生成主题",
+        "fixed_topic": "固定主题列表",
+    },
+)
+_apply_zh_cn_field_schema(
+    AutoReadConfig,
+    {
+        "enable_auto_read": "启用定时读说说",
+        "interval": "读取间隔分钟数",
+        "silent_duration": "静默时间段",
+    },
+)
+_apply_zh_cn_field_schema(
+    AutoReplyConfig,
+    {
+        "enable_auto_reply": "启用自动回复评论",
+        "reply_number": "检查说说数量",
+        "reply_probability": "评论回复概率",
+        "prompt": "评论回复提示词",
+    },
+)
+_apply_zh_cn_field_schema(
+    ImageGenerateConfig,
+    {
+        "base_url": "图片生成 API 地址",
+        "model": "图片生成模型",
+        "api_key": "图片生成 API Key",
+        "enable_reference": "启用参考图",
+        "reference": "参考图片地址或路径",
+        "prompt": "图片生成提示词",
+        "ref_prompt": "参考图附加提示词",
+    },
+)
+_apply_zh_cn_field_schema(
+    AuthorityConfig,
+    {
+        "send_authority_type": "发说说权限模式",
+        "send_whitelist": "发说说白名单",
+        "send_blacklist": "发说说黑名单",
+        "read_authority_type": "读说说权限模式",
+        "read_whitelist": "读说说白名单",
+        "read_blacklist": "读说说黑名单",
+        "auto_read_authority_type": "自动阅读权限模式",
+        "auto_read_whitelist": "自动阅读白名单",
+        "auto_read_blacklist": "自动阅读黑名单",
+    },
+)

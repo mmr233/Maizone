@@ -10,6 +10,7 @@ import json
 import os
 import random
 from pathlib import Path
+from urllib.parse import urlsplit, urlunsplit
 
 from .qzone_api import create_qzone_api
 from .cookie import renew_cookies
@@ -63,6 +64,27 @@ def _allow_skip_comment(config) -> bool:
     if read_cfg is None:
         return True
     return bool(getattr(read_cfg, "allow_skip_comment", True))
+
+
+def _append_video_summaries(content: str, feed: Dict[str, Any]) -> str:
+    summaries = feed.get("video_summaries") or []
+    if not isinstance(summaries, list):
+        return content
+    for index, summary in enumerate(summaries, 1):
+        text = str(summary or "").strip()
+        if text:
+            content += f"\n[视频理解 {index}] {text}"
+    return content
+
+
+def _redact_media_url(url: str) -> str:
+    try:
+        parsed = urlsplit(str(url or "").strip())
+        if parsed.scheme and parsed.netloc:
+            return urlunsplit((parsed.scheme, parsed.netloc, parsed.path, "", ""))
+    except ValueError:
+        pass
+    return "[视频直链]"
 
 
 # ========== 聊天记录处理函数 ==========
@@ -429,6 +451,7 @@ async def read_feed(target_qq: str, enable_comment: bool = True) -> Tuple[bool, 
         if feed["images"]:
             for image in feed["images"]:
                 content = content + image
+        content = _append_video_summaries(content, feed)
         rt_con = feed.get("rt_con", "")
         current_time = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         try:
@@ -521,6 +544,7 @@ async def monitor_read_feed() -> Tuple[bool, list[dict[str, Any]]]:
         if feed["images"]:
             for image in feed["images"]:
                 content = content + image
+        content = _append_video_summaries(content, feed)
         target_qq = feed["target_qq"]
         rt_con = feed.get("rt_con", "")
         try:
@@ -610,6 +634,7 @@ async def reply_feed() -> Tuple[bool, str]:
         if feed["images"]:
             for image in feed["images"]:
                 content = content + image
+        content = _append_video_summaries(content, feed)
         target_qq = feed["target_qq"]
         comments_list = feed["comments"]
         # 检查需要回复的评论
@@ -724,9 +749,24 @@ def format_feed_list(feed_list: List[Dict]) -> str:
         if videos:
             result.append(f"videos: {len(videos)}")
             for j, video in enumerate(videos, 1):
-                result.append(f"  video_{j}: {video}")
+                result.append(f"  video_{j}: {_redact_media_url(video)}")
         else:
             result.append("videos: []")
+
+        video_summaries = feed.get('video_summaries', [])
+        if video_summaries:
+            result.append(f"video_summaries: {len(video_summaries)}")
+            for j, summary in enumerate(video_summaries, 1):
+                result.append(f"  video_summary_{j}: {summary}")
+
+        media_files = feed.get('media_files', [])
+        if media_files:
+            file_counts: Dict[str, int] = {}
+            for media_file in media_files:
+                if isinstance(media_file, dict):
+                    kind = str(media_file.get("type") or "media")
+                    file_counts[kind] = file_counts.get(kind, 0) + 1
+            result.append(f"media_files: {file_counts}")
 
         # 转发内容
         rt_con = feed.get('rt_con', '')

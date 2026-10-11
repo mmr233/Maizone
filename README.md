@@ -6,7 +6,15 @@
 
 ## 概述
 
-Maizone（麦麦空间）插件v3.0.3，让你的麦麦发说说，读QQ空间，点赞评论！
+Maizone（麦麦空间）插件v3.1.0，让你的麦麦发说说，读QQ空间，点赞评论！
+
+## 动态媒体理解
+
+- 配置面板的配置节、字段标签和提示均提供简体中文（`zh_CN`）。
+- 读取空间动态时，Maizone 使用 NapCat `get_cookies` 获取的空间 Cookie 请求动态列表，再从返回数据提取图片和视频地址。图片理解使用 `plugin.media_model` 指定的 MaiBot 多模态任务（默认 `vlm`）。
+- `read.enable_video_understanding` 默认关闭。开启后插件会下载允许域名中的视频到 MaiBot 为插件分配的数据目录，使用 FFmpeg/FFprobe 均匀抽取最多 8 帧，再交给同一多模态任务生成短摘要。
+- 媒体 CDN 请求只带视频页 Referer，不转发空间 Cookie；仅接受 HTTPS 的 `qq.com`、`qpic.cn`、`qlogo.cn`、`gtimg.cn` 域名及其子域名。`read.cache_media_locally` 控制是否缓存图片，视频理解会自动缓存视频；缓存默认保留 24 小时。
+- 启用视频理解前，需在模型管理中配置可用的 `vlm` 任务并确保运行环境可执行 `ffmpeg` 和 `ffprobe`。单个视频默认大小上限 64 MB，最多抽取 4 帧。
 
 ## 功能
 

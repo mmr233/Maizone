@@ -1,9 +1,12 @@
 import base64
+import hashlib
 import json
+import mimetypes
 import os
 import time
 from typing import Any
 from pathlib import Path
+from urllib.parse import urljoin, urlparse
 
 import httpx
 # 额外依赖库
@@ -25,6 +28,13 @@ logger = NoLogger()
 def set_qzoneapi_logger(custom_logger):
     global logger
     logger = custom_logger
+
+_media_runtime: dict[str, Any] = {}
+
+def set_qzone_media_runtime(**options):
+    """设置媒体分析与本地缓存选项，由插件加载时注入。"""
+    global _media_runtime
+    _media_runtime = dict(options)
 
 # ===== Image Manager =====
 class NoImageManager:
@@ -122,8 +132,20 @@ class QzoneAPI:
     LIST_URL = "https://user.qzone.qq.com/proxy/domain/taotao.qq.com/cgi-bin/emotion_cgi_msglist_v6"
     ZONE_LIST_URL = "https://user.qzone.qq.com/proxy/domain/ic2.qzone.qq.com/cgi-bin/feeds/feeds3_html_more"
 
-    def __init__(self, cookies_dict: dict = {}):
-        self.cookies = cookies_dict
+    def __init__(self, cookies_dict: dict | None = None, media_options: dict | None = None):
+        self.cookies = dict(cookies_dict or {})
+        options = dict(media_options or {})
+        cache_dir = options.get("cache_dir")
+        self.media_cache_dir = Path(cache_dir).expanduser() if cache_dir else None
+        self.cache_media_locally = bool(options.get("cache_media_locally", False))
+        self.enable_image_understanding = bool(options.get("enable_image_understanding", True))
+        self.enable_video_understanding = bool(options.get("enable_video_understanding", False))
+        self.media_cache_ttl_hours = max(1, min(720, int(options.get("media_cache_ttl_hours", 24) or 24)))
+        self.image_max_size_mb = max(1, min(100, int(options.get("image_max_size_mb", 20) or 20)))
+        self.video_max_size_mb = max(1, min(2048, int(options.get("video_max_size_mb", 64) or 64)))
+        self.video_frame_count = max(1, min(8, int(options.get("video_frame_count", 4) or 4)))
+        self.ffmpeg_path = str(options.get("ffmpeg_path", "ffmpeg") or "ffmpeg").strip()
+        self._last_media_cleanup = 0.0
         self.uin = self.cookies.get("uin", "").lstrip("o0")   # uin 从cookies中提取，去除前导o和0
         if self.uin == "":
             logger.error("未找到uin，请检查cookies是否正确")
@@ -133,6 +155,140 @@ class QzoneAPI:
 
         if 'p_skey' in self.cookies:
             self.gtk2 = generate_gtk(self.cookies['p_skey'])
+
+    @staticmethod
+    def _normalize_media_url(url: str) -> str:
+        try:
+            value = str(url or "").strip()
+            if value.startswith("//"):
+                value = "https:" + value
+            parsed = urlparse(value)
+            host = (parsed.hostname or "").lower().rstrip(".")
+            allowed_domains = ("qpic.cn", "qlogo.cn", "gtimg.cn", "qq.com")
+            if not host or parsed.scheme not in {"http", "https"} or parsed.username or parsed.password:
+                return ""
+            port = parsed.port
+            if port not in {None, 80, 443}:
+                return ""
+            if not any(host == domain or host.endswith("." + domain) for domain in allowed_domains):
+                return ""
+            netloc = host if port in {None, 80} else f"{host}:443"
+            return parsed._replace(scheme="https", netloc=netloc).geturl()
+        except (TypeError, ValueError):
+            return ""
+
+    @classmethod
+    def _is_allowed_media_url(cls, url: str) -> bool:
+        return bool(cls._normalize_media_url(url))
+
+    def _cleanup_expired_media(self) -> None:
+        if not self.media_cache_dir or time.time() - self._last_media_cleanup < 300:
+            return
+        self._last_media_cleanup = time.time()
+        if not self.media_cache_dir.is_dir():
+            return
+        cutoff = time.time() - self.media_cache_ttl_hours * 3600
+        try:
+            for path in self.media_cache_dir.iterdir():
+                if path.is_file() and path.stat().st_mtime < cutoff:
+                    path.unlink(missing_ok=True)
+        except OSError as exc:
+            logger.warning(f"清理QQ空间媒体缓存失败: {exc}")
+
+    def _media_cache_path(self, url: str, kind: str, content_type: str = "") -> Path | None:
+        if not self.media_cache_dir:
+            return None
+        raw_suffix = Path(urlparse(url).path).suffix.lower()
+        allowed = {".jpg", ".jpeg", ".png", ".webp", ".gif"} if kind == "image" else {".mp4", ".m4v", ".mov", ".webm"}
+        suffix = raw_suffix if raw_suffix in allowed else mimetypes.guess_extension(content_type.split(";", 1)[0].strip())
+        if suffix not in allowed:
+            suffix = ".jpg" if kind == "image" else ".mp4"
+        digest = hashlib.sha256(url.encode("utf-8")).hexdigest()[:32]
+        return self.media_cache_dir / f"{digest}{suffix}"
+
+    async def _download_media(self, url: str, kind: str, *, force_cache: bool = False) -> tuple[bytes | None, Path | None]:
+        normalized_url = self._normalize_media_url(url)
+        if not normalized_url:
+            try:
+                host = urlparse(str(url or "").strip()).hostname or "未知域名"
+            except ValueError:
+                host = "未知域名"
+            logger.warning(f"跳过非受信任的QQ空间媒体地址: {host}")
+            return None, None
+
+        cache_enabled = bool(self.media_cache_dir and (self.cache_media_locally or force_cache))
+        if cache_enabled:
+            self._cleanup_expired_media()
+            cached_path = self._media_cache_path(normalized_url, kind)
+            if cached_path and cached_path.is_file():
+                try:
+                    if time.time() - cached_path.stat().st_mtime <= self.media_cache_ttl_hours * 3600:
+                        return cached_path.read_bytes(), cached_path
+                    cached_path.unlink(missing_ok=True)
+                except OSError:
+                    pass
+        else:
+            cached_path = None
+
+        max_size = (self.image_max_size_mb if kind == "image" else self.video_max_size_mb) * 1024 * 1024
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/139.0.0.0 Safari/537.36",
+            "Referer": "https://user.qzone.qq.com/",
+        }
+        current_url = normalized_url
+        timeout = httpx.Timeout(45.0, connect=10.0)
+        temp_path: Path | None = None
+        try:
+            async with httpx.AsyncClient(timeout=timeout, follow_redirects=False, trust_env=False) as client:
+                for _ in range(6):
+                    current_url = self._normalize_media_url(current_url)
+                    if not current_url:
+                        raise RuntimeError("媒体重定向到非受信任域名，已阻止下载")
+                    async with client.stream("GET", current_url, headers=headers) as response:
+                        if response.status_code in {301, 302, 303, 307, 308}:
+                            location = response.headers.get("Location")
+                            if not location:
+                                raise RuntimeError("媒体重定向缺少 Location")
+                            current_url = urljoin(current_url, location)
+                            continue
+                        response.raise_for_status()
+                        content_type = str(response.headers.get("Content-Type", "") or "")
+                        if content_type and not content_type.lower().startswith(("image/", "video/", "application/octet-stream")):
+                            raise RuntimeError(f"媒体响应类型异常: {content_type.split(';', 1)[0]}")
+                        content_length = int(response.headers.get("Content-Length", "0") or 0)
+                        if content_length > max_size:
+                            raise RuntimeError(f"媒体超过大小限制: {content_length / 1024 / 1024:.1f}MB")
+
+                        if cache_enabled:
+                            cached_path = self._media_cache_path(normalized_url, kind, content_type)
+                            if not cached_path:
+                                raise RuntimeError("未配置媒体缓存目录")
+                            cached_path.parent.mkdir(parents=True, exist_ok=True)
+                            temp_path = cached_path.with_name(f".{cached_path.name}.{os.getpid()}.{os.urandom(4).hex()}.part")
+                            size = 0
+                            with temp_path.open("wb") as file_obj:
+                                async for chunk in response.aiter_bytes(65536):
+                                    size += len(chunk)
+                                    if size > max_size:
+                                        raise RuntimeError(f"媒体超过大小限制: {size / 1024 / 1024:.1f}MB")
+                                    file_obj.write(chunk)
+                            if size == 0:
+                                raise RuntimeError("媒体下载结果为空")
+                            os.replace(temp_path, cached_path)
+                            return cached_path.read_bytes(), cached_path
+
+                        chunks = bytearray()
+                        async for chunk in response.aiter_bytes(65536):
+                            chunks.extend(chunk)
+                            if len(chunks) > max_size:
+                                raise RuntimeError(f"媒体超过大小限制: {len(chunks) / 1024 / 1024:.1f}MB")
+                        return bytes(chunks), None
+                raise RuntimeError("媒体重定向次数过多")
+        except Exception as exc:
+            if temp_path:
+                temp_path.unlink(missing_ok=True)
+            logger.warning("QQ空间%s下载失败: %s", "图片" if kind == "image" else "视频", exc)
+            return None, None
 
     async def get_image_base64_by_url(self, url: str) -> str | None:
         """
@@ -144,20 +300,76 @@ class QzoneAPI:
             Returns:
                 str: 图片的Base64编码字符串，如果获取失败则返回None。
         """
-        headers = {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36",
-            "Referer": "https://qzone.qq.com/"
-        }
-        async with httpx.AsyncClient(follow_redirects=True) as client:
-            request = httpx.Request("GET", url, headers=headers)
-            response = await client.send(request)
-
-        if response.status_code != 200:
-            logger.error(f"请求失败: {response.url} 状态码: {response.status_code}")
-            logger.error(f"原始URL: {url}")
+        image_bytes, _ = await self._download_media(url, "image")
+        if not image_bytes:
             return None
+        return base64.b64encode(image_bytes).decode("utf-8")
 
-        return base64.b64encode(response.content).decode('utf-8')
+    async def _process_feed_media(
+        self,
+        image_urls: list[str],
+        video_items: list[dict[str, Any]],
+    ) -> tuple[list[str], list[str], list[str], list[dict[str, str]]]:
+        image_descriptions: list[str] = []
+        video_urls: list[str] = []
+        video_summaries: list[str] = []
+        media_files: list[dict[str, str]] = []
+        seen_images: set[str] = set()
+
+        for image_url in image_urls:
+            url = str(image_url or "").strip()
+            if not url or url in seen_images:
+                continue
+            seen_images.add(url)
+            image_bytes, local_path = await self._download_media(url, "image")
+            if not image_bytes:
+                continue
+            if local_path:
+                media_files.append({"type": "image", "path": str(local_path)})
+            if self.enable_image_understanding:
+                try:
+                    encoded = base64.b64encode(image_bytes).decode("ascii")
+                    description = await image_manager.get_image_description(encoded)
+                    if description:
+                        image_descriptions.append(str(description).strip())
+                except Exception as exc:
+                    logger.warning("读取QQ空间图片理解失败: %s", exc)
+
+        seen_videos: set[str] = set()
+        for video_item in video_items:
+            if not isinstance(video_item, dict):
+                continue
+            video_url = str(video_item.get("url3") or video_item.get("video_url") or "").strip()
+            if not video_url or video_url in seen_videos:
+                continue
+            seen_videos.add(video_url)
+            video_urls.append(video_url)
+            if not (self.cache_media_locally or self.enable_video_understanding):
+                continue
+
+            _, local_path = await self._download_media(
+                video_url,
+                "video",
+                force_cache=self.enable_video_understanding,
+            )
+            if not local_path:
+                continue
+            media_files.append({"type": "video", "path": str(local_path)})
+            if self.enable_video_understanding:
+                describe_video = getattr(image_manager, "get_video_description", None)
+                if not callable(describe_video):
+                    logger.warning("当前媒体分析器不支持视频理解")
+                    continue
+                try:
+                    summary = await describe_video(
+                        str(local_path), frame_count=self.video_frame_count
+                    )
+                    if summary:
+                        video_summaries.append(str(summary).strip())
+                except Exception as exc:
+                    logger.warning("读取QQ空间视频理解失败: %s", exc)
+
+        return image_descriptions, video_urls, video_summaries, media_files
 
     async def upload_image(self, image: bytes) -> str | None:
         """
@@ -554,37 +766,16 @@ class QzoneAPI:
                     tid = msg.get("tid", "")
                     content = msg.get("content", "")
                     logger.info(f"正在阅读说说内容: {content[:20]}...")
-                    # 提取图片信息
-                    images = []
-                    # TODO 图片可读化
-                    async def append_image_description(url: str):
-                        if not url:
-                            return
-                        try:
-                            image_base64 = await self.get_image_base64_by_url(url)
-                            if not image_base64:
-                                logger.warning(f"获取图片失败: {url}")
-                                return
-                            image_description = await image_manager.get_image_description(image_base64)
-                            images.append(image_description)
-                        except Exception as img_err:
-                            logger.warning(f"获取图片描述失败: {img_err}")
-
+                    image_urls = []
                     for pic in (msg.get("pic") or []):
-                        url = pic.get("url1") or pic.get("pic_id") or pic.get("smallurl")
-                        await append_image_description(url)
-
-                    # 读取视频封面（按图片处理）
-                    for video in (msg.get("video") or []):
-                        video_image_url = video.get("url1") or video.get("pic_url")
-                        await append_image_description(video_image_url)
-
-                    # 提取视频播放地址
-                    videos = []
-                    for video in (msg.get("video") or []):
-                        url = video.get("url3")
-                        if url:
-                            videos.append(url)
+                        if isinstance(pic, dict):
+                            image_urls.append(pic.get("url1") or pic.get("pic_id") or pic.get("smallurl") or "")
+                    video_items = [item for item in (msg.get("video") or []) if isinstance(item, dict)]
+                    for video in video_items:
+                        image_urls.append(video.get("url1") or video.get("pic_url") or "")
+                    images, videos, video_summaries, media_files = await self._process_feed_media(
+                        image_urls, video_items
+                    )
 
                     # 提取转发内容
                     rt_con = ""
@@ -642,6 +833,8 @@ class QzoneAPI:
                                        "content": content,
                                        "images": images,
                                        "videos": videos,
+                                       "video_summaries": video_summaries,
+                                       "media_files": media_files,
                                        "rt_con": rt_con,
                                        "comments": comments})
             if len(feeds_list) == 0:
@@ -763,23 +956,13 @@ class QzoneAPI:
                     image_urls.append(img_tag['src'])
                 # 去重URL
                 unique_urls = list(set(image_urls))
-                # 获取图片描述
-                images = []
-                for url in unique_urls:
-                    try:
-                        image_base64 = await self.get_image_base64_by_url(url)
-                        if not image_base64:
-                            logger.warning(f"获取图片失败: {url}")
-                            continue
-                        description = await image_manager.get_image_description(image_base64)
-                        images.append(description)
-                    except Exception as e:
-                        logger.info(f'图片识别失败: {url} - {str(e)}')
-                # 获取视频url
-                videos = []
+                video_items = []
                 video_div = soup.select_one('div.img-box.f-video-wrap.play')
                 if video_div and 'url3' in video_div.attrs:
-                    videos.append(video_div['url3'])
+                    video_items.append({"url3": video_div['url3']})
+                images, videos, video_summaries, media_files = await self._process_feed_media(
+                    unique_urls, video_items
+                )
                 # 获取评论内容
                 comments_list = []
                 # 查找所有评论项（包括主评论和回复）
@@ -830,6 +1013,8 @@ class QzoneAPI:
                     'content': text,
                     'images': images,
                     'videos': videos,
+                    'video_summaries': video_summaries,
+                    'media_files': media_files,
                     'rt_con': rt_con,
                     'comments': comments_list,
                 })
@@ -898,7 +1083,7 @@ def create_qzone_api() -> QzoneAPI | None:
         cookies = None
 
     if cookies:
-        qzone = QzoneAPI(cookies)
+        qzone = QzoneAPI(cookies, media_options=_media_runtime)
         return qzone
     else:
         return None

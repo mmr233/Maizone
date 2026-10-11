@@ -3,7 +3,8 @@ from maibot_sdk.types import ToolParameterInfo, ToolParamType
 
 from .config import MaizonePluginConfig
 from .cookie import renew_cookies, set_api_capability, set_cookie_logger
-from .qzone_api import create_qzone_api, set_qzoneapi_logger
+from .qzone_api import create_qzone_api, set_image_manager, set_qzone_media_runtime, set_qzoneapi_logger
+from .media import QzoneMediaAnalyzer
 from .image import set_images_plugin_context
 from .utils import set_utils_plugin_context, read_feed, send_feed
 from .tasks import FeedMonitor, ScheduleSender, set_tasks_logger
@@ -14,6 +15,25 @@ class MaizonePlugin(MaiBotPlugin):
     personality = ""
     reply_style = ""
 
+    def _configure_media(self):
+        self.media_analyzer = QzoneMediaAnalyzer(
+            self.ctx,
+            model_task=self.config.plugin.media_model,
+            ffmpeg_path=self.config.read.ffmpeg_path,
+        )
+        set_image_manager(self.media_analyzer)
+        set_qzone_media_runtime(
+            cache_dir=self.ctx.paths.data_dir / "qzone_media",
+            cache_media_locally=self.config.read.cache_media_locally,
+            enable_image_understanding=self.config.read.enable_image_understanding,
+            enable_video_understanding=self.config.read.enable_video_understanding,
+            media_cache_ttl_hours=self.config.read.media_cache_ttl_hours,
+            image_max_size_mb=self.config.read.image_max_size_mb,
+            video_max_size_mb=self.config.read.video_max_size_mb,
+            video_frame_count=self.config.read.video_frame_count,
+            ffmpeg_path=self.config.read.ffmpeg_path,
+        )
+
     async def on_load(self):
         """插件加载：检查配置、测试napcat连接、注册定时任务等"""
         set_api_capability(self.ctx.api)
@@ -22,12 +42,18 @@ class MaizonePlugin(MaiBotPlugin):
         set_cookie_logger(self.ctx.logger)
         set_utils_plugin_context(self)
         set_images_plugin_context(self)
+        self._configure_media()
 
         # ===== 检查文本模型是否可用 =====
         available_models = await self.ctx.llm.get_available_models()
         text_model = self.config.plugin.text_model  # type: ignore
         if text_model not in available_models:
             self.ctx.logger.error(f"文本模型{text_model}不可用，请检查配置")
+        media_model = self.config.plugin.media_model  # type: ignore
+        if media_model not in available_models:
+            self.ctx.logger.warning(f"多模态模型任务{media_model}当前不可用，QQ空间图片/视频理解将失败")
+        if self.config.read.enable_video_understanding and self.config.plugin.media_model not in available_models:
+            self.ctx.logger.warning("已开启QQ空间视频理解，但多模态模型任务不可用")
 
         # ===== 测试通过adapter或napcat获取cookie =====
         napcat_host = self.config.plugin.http_host  # type: ignore
@@ -62,9 +88,10 @@ class MaizonePlugin(MaiBotPlugin):
 
     async def on_config_update(self, scope: str, config_data: dict[str, object], version: str):
         """配置热更新回调"""
-        del scope
         del config_data
         del version
+        if scope == "self":
+            self._configure_media()
 
     # 权限检查
     def check_permission(self, qq_account: str, tool: str) -> bool:
